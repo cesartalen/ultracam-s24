@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phonecam</title>
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #111; color: #ddd; display: flex; height: 100vh; }
+  img { flex: 1; min-width: 0; object-fit: contain; background: #000; cursor: crosshair; }
+  #panel { width: 340px; padding: 12px; overflow: auto; box-sizing: border-box; }
+  label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  label > span { width: 84px; flex: none; }
+  input[type=range] { flex: 1; min-width: 0; }
+  output { width: 64px; text-align: right; flex: none; }
+  select, input[type=text] { flex: 1; background: #222; color: #ddd; border: 1px solid #444; padding: 4px; }
+  button { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 10px; margin: 2px; cursor: pointer; }
+  [hidden] { display: none !important; }
+  #status { font-size: 12px; color: #888; white-space: pre-wrap; margin-top: 12px; }
+  @media (max-width: 700px) { body { flex-direction: column; height: auto; } img { height: 40vh; } #panel { width: auto; } }
+</style>
+</head>
+<body>
+<img id="preview">
+<div id="panel">
+  <label data-k="camera"><span>Camera</span><select></select></label>
+  <label data-k="lens"><span>Lens</span><select></select></label>
+  <label data-k="res"><span>Resolution</span><select>
+    <option>3840x2160</option><option>2560x1440</option><option>1920x1080</option><option>1280x720</option></select></label>
+  <label data-k="fps"><span>FPS</span><select><option>15</option><option>24</option><option>30</option><option>60</option></select></label>
+  <label data-k="bitrate"><span>Bitrate</span><input type="range" min="1000" max="20000" step="500"><output></output></label>
+  <label data-k="zoom"><span>Zoom</span><input type="range" step="0.1"><output></output></label>
+  <label data-k="af"><span>Autofocus</span><input type="checkbox"></label>
+  <label data-k="afLock"><span>AF lock</span><input type="checkbox"></label>
+  <label data-k="focus"><span>Focus</span><input type="range" min="0" step="0.05"><output></output></label>
+  <label data-k="ev"><span>Exposure</span><input type="range" step="1"><output></output></label>
+  <label data-k="manual"><span>Manual</span><input type="checkbox"></label>
+  <label data-k="iso"><span>ISO</span><input type="range" step="1"><output></output></label>
+  <label data-k="shutter"><span>Shutter</span><input type="range" step="0.01"><output></output></label>
+  <label data-k="awbLock"><span>AWB lock</span><input type="checkbox"></label>
+  <label data-k="eis"><span>Stabilize</span><input type="checkbox"></label>
+  <label data-k="torch"><span>Torch</span><input type="checkbox"></label>
+  <label><span>Presets</span><input type="text" id="name" placeholder="name"><button id="save">Save</button></label>
+  <div id="presets"></div>
+  <div id="status"></div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const rows = {};
+document.querySelectorAll('[data-k]').forEach(el => rows[el.dataset.k] = el);
+const input = k => rows[k].querySelector('input,select');
+let ws, st = {}, caps = {};
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => render(JSON.parse(e.data));
+  ws.onclose = () => setTimeout(connect, 2000);
+}
+const send = o => ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+const fmt = {
+  bitrate: v => `${v} kbps`,
+  zoom: v => `${(+v).toFixed(1)}x`,
+  focus: v => v > 0 ? `${(100 / v).toFixed(0)} cm` : v < 0 ? '-' : 'inf',
+  ev: v => `${(v * (caps.evStep || 0)).toFixed(1)} EV`,
+  iso: v => `${v}`,
+  shutter: v => `1/${Math.round(1e9 / v)}`,
+};
+
+for (const k in rows) {
+  const inp = input(k);
+  inp.addEventListener(inp.type === 'range' ? 'input' : 'change', () => {
+    if (k === 'res') {
+      const [width, height] = inp.value.split('x').map(Number);
+      return send({ width, height });
+    }
+    let v = inp.type === 'checkbox' ? inp.checked : inp.type === 'range' || k === 'fps' ? +inp.value : inp.value;
+    if (k === 'shutter') v = Math.round(Math.exp(v));
+    if (inp.type === 'range') rows[k].querySelector('output').textContent = fmt[k](v);
+    send({ [k]: v });
+  });
+}
+$('#save').onclick = () => $('#name').value && send({ preset: 'save', name: $('#name').value });
+
+function setRange(k, range, value) {
+  const inp = input(k);
+  rows[k].hidden = !range;
+  if (!range) return;
+  if (k === 'shutter') {
+    inp.min = Math.log(range[0]);
+    inp.max = Math.log(range[1]);
+    value = Math.log(value);
+  } else {
+    inp.min = range[0];
+    inp.max = range[1];
+  }
+  if (document.activeElement !== inp) inp.value = value;
+}
+
+function render(m) {
+  st = m.state;
+  caps = m.caps;
+  const cam = input('camera');
+  if (cam.options.length !== m.cameras.length) cam.innerHTML = m.cameras.map(c => `<option>${c}</option>`).join('');
+  const lensIds = Object.keys(caps.lenses || {});
+  rows.lens.hidden = lensIds.length === 0;
+  const lens = input('lens');
+  if (lens.options.length !== lensIds.length + 1) {
+    lens.innerHTML = '<option value="auto">auto</option>' +
+      lensIds.map(id => `<option value="${id}">${id} (${caps.lenses[id]}mm)</option>`).join('');
+  }
+  for (const k of ['camera', 'lens', 'fps']) if (document.activeElement !== input(k)) input(k).value = st[k];
+  if (document.activeElement !== input('res')) input('res').value = `${st.width}x${st.height}`;
+  for (const k of ['af', 'afLock', 'manual', 'awbLock', 'eis', 'torch']) input(k).checked = !!st[k];
+  rows.afLock.hidden = !st.af || caps.focus == null;
+  setRange('bitrate', [1000, 20000], st.bitrate);
+  setRange('zoom', caps.zoom, st.zoom);
+  setRange('focus', st.af ? null : caps.focus != null && [0, caps.focus], st.focus);
+  setRange('ev', st.manual ? null : caps.ev, st.ev);
+  setRange('iso', st.manual ? caps.iso : null, st.iso);
+  setRange('shutter', st.manual ? caps.shutter : null, st.shutter);
+  for (const k of ['awbLock', 'eis', 'torch']) rows[k].hidden = !caps[k];
+  rows.manual.hidden = !caps.iso;
+  rows.af.hidden = caps.focus == null;
+  for (const k in fmt) if (!rows[k].hidden) rows[k].querySelector('output').textContent = fmt[k](st[k]);
+  $('#presets').innerHTML = m.presets.map(p => `<button data-load="${p}">${p}</button><button data-del="${p}">x</button>`).join('');
+  $('#presets').querySelectorAll('[data-load]').forEach(b => b.onclick = () => send({ preset: 'load', name: b.dataset.load }));
+  $('#presets').querySelectorAll('[data-del]').forEach(b => b.onclick = () => send({ preset: 'delete', name: b.dataset.del }));
+  const l = m.live;
+  $('#status').textContent = `${m.rtsp}  clients: ${m.clients}\n` + (l.iso
+    ? `live: ISO ${l.iso}  1/${Math.round(1e9 / l.shutter)}  focus ${fmt.focus(l.focus)}  zoom ${fmt.zoom(l.zoom)}  lens ${l.lens ?? '-'}`
+    : '');
+}
+
+const img = $('#preview');
+const refresh = () => img.src = `/preview.jpg?${Date.now()}`;
+img.onload = img.onerror = () => setTimeout(refresh, 1000);
+img.onclick = e => {
+  if (!caps.tap || !img.naturalWidth) return;
+  const r = img.getBoundingClientRect();
+  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+  const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+  const x = (e.clientX - r.left - (r.width - w) / 2) / w;
+  const y = (e.clientY - r.top - (r.height - h) / 2) / h;
+  if (x >= 0 && x <= 1 && y >= 0 && y <= 1) send({ tap: [x, y] });
+};
+refresh();
+connect();
+</script>
+</body>
+</html>
